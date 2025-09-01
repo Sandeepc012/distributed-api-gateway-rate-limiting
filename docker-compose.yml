@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  ratelimiter:
+    build: ./ratelimiter
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DEFAULT_RPS=50
+      - DEFAULT_BURST=100
+      - WINDOW_SECONDS=60
+      - ENABLE_SLIDING_WINDOW=true
+      - PROMETHEUS_PORT=8000
+    ports: ["8000:8000"]
+    depends_on: [redis]
+
+  echo-grpc:
+    build: ./services/echo_grpc
+    ports: ["50051:50051", "9100:9100"]
+    environment:
+      - METRICS_PORT=9100
+
+  users-api:
+    build: ./services/users_api
+    ports: ["8081:8081", "9101:9101"]
+    environment:
+      - METRICS_PORT=9101
+
+  envoy:
+    build: ./gateway
+    ports:
+      - "8080:8080"
+      - "9901:9901"
+    depends_on: [ratelimiter, echo-grpc, users-api]
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [envoy, ratelimiter, echo-grpc, users-api]
