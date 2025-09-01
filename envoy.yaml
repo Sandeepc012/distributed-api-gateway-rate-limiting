@@ -1,0 +1,129 @@
+static_resources:
+  listeners:
+  - name: listener_http
+    address:
+      socket_address: { address: 0.0.0.0, port_value: 8080 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          http2_protocol_options: {}
+          use_remote_address: true
+          access_log:
+          - name: envoy.access_loggers.stdout
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: backend
+              domains: ["*"]
+              routes:
+              - match: { prefix: "/grpc.echo.EchoService" }
+                route:
+                  cluster: echo_service
+                  retry_policy:
+                    retry_on: "cancelled,deadline-exceeded,connect-failure,refused-stream,unavailable,retriable-status-codes"
+                    num_retries: 3
+                    per_try_timeout: 2s
+              - match: { prefix: "/users" }
+                route:
+                  cluster: users_service
+                  timeout: 5s
+                  retry_policy:
+                    retry_on: "5xx,connect-failure,refused-stream,retriable-status-codes,gateway-error"
+                    num_retries: 2
+                    per_try_timeout: 1s
+          http_filters:
+          - name: envoy.filters.http.ext_authz
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              transport_api_version: V3
+              with_request_body:
+                allow_partial_message: true
+                max_request_bytes: 8192
+                pack_as_bytes: true
+              failure_mode_allow: false
+              include_peer_certificate: false
+              http_service:
+                server_uri:
+                  uri: ratelimiter:8000
+                  cluster: ratelimiter
+                  timeout: 0.5s
+                authorization_request:
+                  headers_to_add:
+                    - header: { key: "x-original-path", value: "%REQ(:PATH)%" }
+                    - header: { key: "x-original-method", value: "%REQ(:METHOD)%" }
+                    - header: { key: "x-api-key", value: "%REQ(x-api-key)%" }
+                path_prefix: "/authorize"
+                authorization_response:
+                  allowed_upstream_headers:
+                    patterns:
+                      - exact: "x-rate-limit-remaining"
+                      - exact: "x-rate-limit-reset"
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: echo_service
+    type: STRICT_DNS
+    connect_timeout: 0.25s
+    lb_policy: ROUND_ROBIN
+    http2_protocol_options: {}
+    circuit_breakers:
+      thresholds:
+        - max_connections: 1024
+          max_pending_requests: 1024
+          max_requests: 5000
+          max_retries: 3
+    outlier_detection:
+      consecutive_5xx: 5
+      interval: 5s
+      base_ejection_time: 30s
+      max_ejection_percent: 50
+    load_assignment:
+      cluster_name: echo_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address: { socket_address: { address: echo-grpc, port_value: 50051 } }
+
+  - name: users_service
+    type: STRICT_DNS
+    connect_timeout: 0.25s
+    lb_policy: ROUND_ROBIN
+    circuit_breakers:
+      thresholds:
+        - max_connections: 2048
+          max_pending_requests: 2048
+          max_requests: 10000
+          max_retries: 3
+    outlier_detection:
+      consecutive_5xx: 5
+      interval: 5s
+      base_ejection_time: 30s
+      max_ejection_percent: 50
+    load_assignment:
+      cluster_name: users_service
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address: { socket_address: { address: users-api, port_value: 8081 } }
+
+  - name: ratelimiter
+    type: STRICT_DNS
+    connect_timeout: 0.2s
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: ratelimiter
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address: { socket_address: { address: ratelimiter, port_value: 8000 } }
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
